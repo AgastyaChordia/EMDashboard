@@ -1,0 +1,34 @@
+name: Weekly market data refresh
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC. Adjust to your timezone/preference.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly refresh
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python run_weekly.py
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/market.duckdb
+          git commit -m "Weekly data refresh $(date +%Y-%m-%d)" || echo "Nothing to commit"
+          git push

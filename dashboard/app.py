@@ -53,6 +53,10 @@ st.markdown("""
   .tick-item {display:flex; flex-direction:column; line-height:1.25;}
   .tick-name {font-size:11px; color:#8b8fa3; letter-spacing:.5px;}
   .tick-px   {font-size:15px; font-weight:600; color:#e6e8f0;}
+  /* KPI cards live in a responsive grid: 4-up on desktop, wrapping down to
+     2-up / 1-up on narrow screens without any server-side width detection. */
+  .kpi-grid {display:grid; gap:12px;
+      grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));}
   .kpi {background:#1a1d29; border:1px solid #2a2e3d; border-radius:12px;
       padding:14px 16px; height:100%;}
   .kpi-label {font-size:11px; color:#8b8fa3; text-transform:uppercase;
@@ -60,6 +64,16 @@ st.markdown("""
   .kpi-val {font-size:26px; font-weight:650; color:#e6e8f0; margin-top:2px;}
   .badge {display:inline-block; margin-top:8px; padding:2px 9px; border-radius:20px;
       font-size:12px; font-weight:600;}
+  /* Mobile: stack Streamlit's side-by-side st.columns full width, and give
+     charts/text a little more room by trimming page padding. */
+  @media (max-width: 640px) {
+    .block-container {padding-left:.7rem; padding-right:.7rem; padding-top:1rem;}
+    .kpi-val {font-size:22px;}
+    .tick-strip {gap:18px;}
+    [data-testid="stHorizontalBlock"] {flex-wrap:wrap;}
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex:1 1 100% !important; width:100% !important; min-width:100% !important;}
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,14 +91,20 @@ def fmt(v, suffix="", pct=False, decimals=2):
 
 
 def style_table(df: pd.DataFrame):
-    """DataFrame for an expander -- NaN shown as en dash, numbers rounded."""
-    return df.round(2).fillna(DASH)
+    """Format a *numeric* dataframe for display: show NaN as an en dash and
+    round floats, WITHOUT mutating the underlying data. Returns a pandas
+    Styler so the columns stay numeric -- writing the '–' string into the
+    data itself produced mixed str/float columns that pyarrow refused to
+    serialize (ArrowInvalid: "Could not convert '-' ...")."""
+    return df.style.format(na_rep=DASH, precision=2, thousands=",")
 
 
 def kpi_row(items):
-    """items: list of (label, value_str, delta_pct_or_None). Renders cards."""
-    cols = st.columns(len(items))
-    for col, (label, value, delta) in zip(cols, items):
+    """items: list of (label, value_str, delta_pct_or_None). Renders the cards
+    in a single responsive CSS grid (see .kpi-grid) so they wrap gracefully on
+    narrow screens instead of squishing into fixed st.columns."""
+    cards = []
+    for label, value, delta in items:
         if delta is None:
             badge = ""
         else:
@@ -93,10 +113,11 @@ def kpi_row(items):
             bg = "rgba(45,212,191,.14)" if up else "rgba(251,113,133,.14)"
             badge = (f"<span class='badge' style='background:{bg};color:{color}'>"
                      f"{'+' if up else ''}{delta:.2f}%</span>")
-        col.markdown(
+        cards.append(
             f"<div class='kpi'><div class='kpi-label'>{label}</div>"
-            f"<div class='kpi-val'>{value}</div>{badge}</div>",
-            unsafe_allow_html=True)
+            f"<div class='kpi-val'>{value}</div>{badge}</div>")
+    st.markdown(f"<div class='kpi-grid'>{''.join(cards)}</div>",
+                unsafe_allow_html=True)
 
 
 def returns_bar(series: pd.Series, title: str):

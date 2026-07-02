@@ -16,7 +16,7 @@ import anthropic
 import pandas as pd
 
 from transform.analytics import period_returns, volatility, correlation_matrix
-from db import save_commentary
+from db import save_commentary, get_secret
 
 MODEL = "claude-sonnet-4-6"
 
@@ -66,7 +66,9 @@ def generate_weekly_commentary() -> str:
         return ("No data available yet -- run the ingest scripts first "
                 "(ingest/market_data.py, ingest/fixed_income.py, ingest/macro.py).")
 
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    # Explicit key so this works on Streamlit Cloud (st.secrets) as well as
+    # from a local env var -- anthropic.Anthropic() alone only reads env.
+    client = anthropic.Anthropic(api_key=get_secret("ANTHROPIC_API_KEY"))
     message = client.messages.create(
         model=MODEL,
         max_tokens=800,

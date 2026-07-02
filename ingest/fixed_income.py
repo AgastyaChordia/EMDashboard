@@ -5,7 +5,6 @@ Needs a free API key: https://fred.stlouisfed.org/docs/api/api_key.html
 Set it as an environment variable before running:
     export FRED_API_KEY=your_key_here
 """
-import os
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -14,7 +13,7 @@ import pandas as pd
 from fredapi import Fred
 
 from config import FRED_YIELDS, CREDIT_SPREADS_FRED
-from db import upsert_prices, init_schema
+from db import upsert_prices, init_schema, get_secret
 
 
 def fetch_fred_series(series_map: dict, module: str, fred: Fred,
@@ -45,11 +44,12 @@ def fetch_fred_series(series_map: dict, module: str, fred: Fred,
 
 
 def run():
-    api_key = os.environ.get("FRED_API_KEY")
+    api_key = get_secret("FRED_API_KEY")
     if not api_key:
         print("FRED_API_KEY not set -- get a free key at "
               "https://fred.stlouisfed.org/docs/api/api_key.html and "
-              "export FRED_API_KEY=... before running this.")
+              "export FRED_API_KEY=... (or add it to Streamlit secrets) "
+              "before running this.")
         return
 
     init_schema()

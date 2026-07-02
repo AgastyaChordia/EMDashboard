@@ -20,8 +20,41 @@ DB_PATH = Path(__file__).parent / "data" / "market.duckdb"
 DB_PATH.parent.mkdir(exist_ok=True)
 
 
+def get_secret(key: str, default=None):
+    """Read a secret/API key. Checks os.environ first (local .zshrc, cron,
+    GitHub Actions), then falls back to st.secrets when running inside
+    Streamlit -- Streamlit Cloud provides secrets via st.secrets, not env
+    vars. Importing streamlit is lazy so CLI/ingest runs stay lightweight.
+    """
+    val = os.environ.get(key)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        # No streamlit runtime / no secrets file configured -- fine.
+        pass
+    return default
+
+
 def get_connection():
     return duckdb.connect(str(DB_PATH))
+
+
+def has_price_data() -> bool:
+    """True if the prices table exists and holds at least one row. Used by
+    the dashboard to decide whether to show the first-run 'fetch data' state
+    (e.g. on a fresh Streamlit Cloud deploy where the DuckDB file wasn't
+    committed to git)."""
+    con = get_connection()
+    try:
+        return con.execute("SELECT COUNT(*) FROM prices").fetchone()[0] > 0
+    except Exception:
+        return False
+    finally:
+        con.close()
 
 
 def init_schema():

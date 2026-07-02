@@ -20,7 +20,8 @@ import streamlit as st
 
 from config import (EQUITY_INDICES, CURRENCY_PAIRS, COMMODITIES, RISK_SENTIMENT,
                     BRICS_PLUS, PHASE_3_MODULES, PHASE_4_MODULES)
-from db import read_prices, get_connection
+from db import (read_prices, get_connection, init_schema, has_price_data,
+                get_secret)
 from transform.analytics import (period_returns, volatility, correlation_matrix,
                                  drawdown)
 
@@ -356,6 +357,55 @@ def render_roadmap():
 
 
 # --------------------------------------------------------------------------
+# First-run ingestion: on a fresh deploy (e.g. Streamlit Cloud) the DuckDB
+# file isn't in git, so the DB is empty. Let the user populate it in-app.
+# --------------------------------------------------------------------------
+def run_full_ingestion():
+    """Run the full pipeline in-app with a live progress indicator, then
+    clear cached reads and rerun so the fresh data shows immediately. Keys
+    come from get_secret() -> env var or st.secrets."""
+    # Imported lazily so a normal page load doesn't pay yfinance's import cost.
+    from ingest import market_data, fixed_income, macro
+    with st.status("Fetching market data — this takes a couple of minutes…",
+                   expanded=True) as status:
+        st.write("① Equities, currencies, commodities, risk (Yahoo Finance)…")
+        market_data.run()
+        st.write("② Sovereign yields & credit spreads (FRED)…")
+        fixed_income.run()
+        st.write("③ Macro indicators (World Bank)…")
+        macro.run()
+        st.write("④ Generating AI weekly briefing…")
+        try:
+            from ai.commentary import generate_weekly_commentary
+            generate_weekly_commentary()
+        except Exception as e:
+            st.write(f"   AI briefing skipped: {e}")
+        status.update(label="Data ready ✓", state="complete")
+    # DuckDB now holds the data (persists across reruns/opens on the same
+    # container). Clear the @st.cache_data read caches so charts pick it up;
+    # we only ever refetch from the network when a button is clicked again.
+    st.cache_data.clear()
+    st.rerun()
+
+
+def render_first_run():
+    st.info("**No data yet — click below to fetch it.** This deploy started "
+            "with an empty database (the DuckDB file isn't committed to git). "
+            "The button pulls live data from Yahoo Finance, FRED and the "
+            "World Bank, and generates the AI briefing.")
+    missing = [k for k in ("FRED_API_KEY", "ANTHROPIC_API_KEY")
+               if not get_secret(k)]
+    if missing:
+        st.warning(
+            "Missing secret(s): **" + ", ".join(missing) + "**. Add them in "
+            "Streamlit Cloud → Settings → Secrets. FRED powers the yields tab "
+            "and ANTHROPIC the AI briefing; equities/FX/commodities/macro will "
+            "still load without them.")
+    if st.button("⬇  Fetch market data now", type="primary"):
+        run_full_ingestion()
+
+
+# --------------------------------------------------------------------------
 # Layout: sidebar nav + ticker strip + selected section
 # --------------------------------------------------------------------------
 SECTIONS = {
@@ -369,14 +419,28 @@ SECTIONS = {
     "\U0001F5FA️  Roadmap":    render_roadmap,
 }
 
+# Make sure the tables exist before any read -- on a fresh deploy they won't.
+init_schema()
+data_ready = has_price_data()
+
 with st.sidebar:
     st.markdown("### \U0001F4CA Global Markets Terminal")
     st.caption("Emerging & global markets · BRICS+ focus")
     choice = st.radio("Navigate", list(SECTIONS.keys()), label_visibility="collapsed")
     st.divider()
     st.caption("Data: Yahoo Finance · FRED · World Bank")
+    if data_ready:
+        # Persistent refetch control -- data is otherwise cached (the DuckDB
+        # file), so the network is only hit when this is clicked.
+        if st.button("↻  Refresh data"):
+            run_full_ingestion()
 
 st.title("Global & emerging markets")
+
+if not data_ready:
+    render_first_run()
+    st.stop()
+
 ticker_strip(["US_SP500", "CHINA_SSE", "JAPAN_NIKKEI", "INDIA_NIFTY50",
               "UK_FTSE100", "BRAZIL_BOVESPA"])
 st.write("")

@@ -19,7 +19,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import (EQUITY_INDICES, CURRENCY_PAIRS, COMMODITIES, RISK_SENTIMENT,
-                    BRICS_PLUS, PHASE_3_MODULES, PHASE_4_MODULES)
+                    BRICS_PLUS, INDIA_INDICES, PHASE_3_MODULES, PHASE_4_MODULES)
 from db import (read_prices, get_connection, init_schema, has_price_data,
                 get_secret)
 from transform.analytics import (period_returns, volatility, correlation_matrix,
@@ -220,13 +220,15 @@ def top_movers_kpis(returns: pd.DataFrame, window="1M", n=4):
 # --------------------------------------------------------------------------
 def render_equities():
     st.subheader("Global equity indices")
-    only_brics = st.toggle("BRICS+ only", value=False)
+    group = st.radio("Filter", ["All", "BRICS+", "India"],
+                     horizontal=True, label_visibility="collapsed")
+    group_filter = {"BRICS+": BRICS_PLUS, "India": INDIA_INDICES}.get(group)
     returns = period_returns("equities")
     if returns.empty:
         st.info("No data yet -- run `python ingest/market_data.py` first.")
         return
-    if only_brics:
-        returns = returns[returns.index.isin(BRICS_PLUS)]
+    if group_filter:
+        returns = returns[returns.index.isin(group_filter)]
 
     windows = [w for w in ["1M", "3M", "6M", "1Y", "3Y", "5Y"] if w in returns.columns]
     window = st.radio("Return window", windows,
@@ -238,8 +240,8 @@ def render_equities():
     with c1:
         st.markdown("**Volatility** (21D annualized)")
         vol = volatility("equities")
-        if only_brics:
-            vol = vol[vol.index.isin(BRICS_PLUS)]
+        if group_filter:
+            vol = vol[vol.index.isin(group_filter)]
         returns_bar(vol["volatility_pct"], "Realized volatility %")
     with c2:
         st.markdown("**Drawdown**")

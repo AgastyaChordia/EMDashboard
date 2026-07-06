@@ -30,6 +30,9 @@ EQUITY_INDICES = {
     "JAPAN_NIKKEI":    "^N225",
     "HONGKONG_HSI":    "^HSI",
     "INDIA_NIFTY50":   "^NSEI",
+    "INDIA_SENSEX":    "^BSESN",     # BSE Sensex -- verified on Yahoo
+    "INDIA_NIFTYBANK": "^NSEBANK",   # Nifty Bank -- verified on Yahoo
+    "INDIA_NIFTY_MIDCAP50": "^NSEMDCP50",  # Nifty Midcap 50 -- verified on Yahoo
     "UK_FTSE100":      "^FTSE",
     "FRANCE_CAC40":    "^FCHI",
     "GERMANY_DAX":     "^GDAXI",
@@ -55,6 +58,12 @@ BRICS_PLUS = {
     "SOUTHAFRICA_JSE", "INDONESIA_JKSE", "SAUDI_TASI",
     # Russia (MOEX) intentionally excluded -- not reliably available on
     # free Western data feeds since 2022. Add a dedicated source if needed.
+}
+
+# Indian indices, grouped so the dashboard can filter to them the same way
+# it filters BRICS+. All four are verified to return data from Yahoo Finance.
+INDIA_INDICES = {
+    "INDIA_NIFTY50", "INDIA_SENSEX", "INDIA_NIFTYBANK", "INDIA_NIFTY_MIDCAP50",
 }
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 
 from db import read_prices
+from config import INDEX_FX_MAP
 
 RETURN_WINDOWS = {
     "1M": 21, "3M": 63, "6M": 126, "1Y": 252,
@@ -41,6 +42,61 @@ def period_returns(module: str) -> pd.DataFrame:
         if len(px) > days:
             past = px.iloc[-days - 1]
             out[label] = (latest / past - 1) * 100
+    return pd.DataFrame(out)
+
+
+def _usd_per_local_factor(px_index: pd.Index) -> pd.DataFrame:
+    """One column per equity index giving the USD-per-unit-of-local-currency
+    factor, aligned to the equity trading calendar `px_index`.
+
+    A rising factor == local currency strengthening vs USD == tailwind for a
+    USD-based investor. For USD_PER_FOREIGN pairs the quoted pair already *is*
+    that factor; for FOREIGN_PER_USD pairs it's inverted (1/pair); USD-priced
+    indices get a constant 1.0. Indices with no mapped/available pair are
+    omitted, so downstream returns come back NaN for them (never fabricated).
+    DXY is never referenced -- it isn't a bilateral pair in INDEX_FX_MAP.
+    """
+    fx = _pivot_close("currencies")
+    factors = {}
+    for asset_id, (pair, quote) in INDEX_FX_MAP.items():
+        if quote == "USD":
+            factors[asset_id] = pd.Series(1.0, index=px_index)
+            continue
+        if fx.empty or pair not in fx.columns:
+            continue                      # no FX data for this pair -> blank
+        # Align FX close onto the equity calendar; forward-fill only bridges
+        # holiday/calendar gaps. Dates before the FX series starts stay NaN,
+        # so a window with missing FX history yields a NaN (blank) USD return.
+        rate = fx[pair].reindex(px_index).ffill()
+        factors[asset_id] = rate if quote == "USD_PER_FOREIGN" else 1.0 / rate
+    return pd.DataFrame(factors, index=px_index)
+
+
+def period_returns_usd(module: str = "equities") -> pd.DataFrame:
+    """USD-adjusted counterpart to period_returns(): for each window, combines
+    the local-currency index return with the FX return over the *same* two
+    endpoint dates, multiplicatively:
+
+        USD_return = (1 + local_return) * (1 + fx_return) - 1
+
+    where fx_return already carries the correct sign per INDEX_FX_MAP. Indices
+    without a clean FX match (or with missing FX for the window) come back NaN.
+    Values are in percent, matching period_returns()."""
+    px = _pivot_close(module)
+    if px.empty:
+        return pd.DataFrame()
+    factor = _usd_per_local_factor(px.index)
+    if factor.empty:
+        return pd.DataFrame()
+    out = {}
+    for label, days in RETURN_WINDOWS.items():
+        if len(px) <= days:
+            continue
+        local = px.iloc[-1] / px.iloc[-days - 1] - 1
+        fx_ret = factor.iloc[-1] / factor.iloc[-days - 1] - 1
+        # Series align on asset_id; indices absent from `factor` -> NaN, which
+        # propagates so their USD cell stays blank rather than mirroring local.
+        out[label] = ((1 + local) * (1 + fx_ret) - 1) * 100
     return pd.DataFrame(out)
 
 

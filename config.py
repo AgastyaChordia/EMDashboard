@@ -83,6 +83,54 @@ CURRENCY_PAIRS = {
 }
 
 # ---------------------------------------------------------------------------
+# 2b. EQUITY INDEX -> FX PAIR, for USD-adjusting local-currency index returns.
+#     Maps each index (by its home country's currency) to the matching
+#     bilateral pair in CURRENCY_PAIRS, plus how that pair is *quoted*, which
+#     decides the sign of the FX effect when combined with the local return:
+#
+#       "USD_PER_FOREIGN"  pair value = USD per 1 unit of local currency
+#                          (EURUSD, GBPUSD, AUDUSD). A rising pair means the
+#                          local currency strengthened vs USD -> tailwind, so
+#                          the pair's own return combines directly.
+#       "FOREIGN_PER_USD"  pair value = local-currency units per 1 USD
+#                          (USDINR/USDJPY/USDCNY/USDCHF/USDKRW/USDTWD). This is
+#                          inverted: a rising pair means the local currency
+#                          *weakened*, so we invert (1/pair) before combining.
+#       "USD"              index is already priced in USD (US) -> USD return
+#                          equals local return, no FX conversion.
+#
+#     DXY is the dollar index, not a bilateral pair -- deliberately never used
+#     to convert a single index. Indices whose currency has no matching pair
+#     here (HKD, CAD, BRL, IDR, MXN, SGD, SAR, ZAR) are omitted entirely: their
+#     USD return is left blank rather than estimated. Never fabricate a rate.
+# ---------------------------------------------------------------------------
+INDEX_FX_MAP = {
+    "US_SP500":              ("USD",    "USD"),
+    "US_NASDAQ":             ("USD",    "USD"),
+    "CHINA_SSE":             ("USDCNY", "FOREIGN_PER_USD"),
+    "CHINA_SZSE":            ("USDCNY", "FOREIGN_PER_USD"),
+    "JAPAN_NIKKEI":          ("USDJPY", "FOREIGN_PER_USD"),
+    "INDIA_NIFTY50":         ("USDINR", "FOREIGN_PER_USD"),
+    "INDIA_SENSEX":          ("USDINR", "FOREIGN_PER_USD"),
+    "INDIA_NIFTYBANK":       ("USDINR", "FOREIGN_PER_USD"),
+    "INDIA_NIFTY_MIDCAP50":  ("USDINR", "FOREIGN_PER_USD"),
+    "UK_FTSE100":            ("GBPUSD", "USD_PER_FOREIGN"),
+    "FRANCE_CAC40":          ("EURUSD", "USD_PER_FOREIGN"),
+    "GERMANY_DAX":           ("EURUSD", "USD_PER_FOREIGN"),
+    "SWITZERLAND_SMI":       ("USDCHF", "FOREIGN_PER_USD"),
+    "AUSTRALIA_ASX200":      ("AUDUSD", "USD_PER_FOREIGN"),
+    "TAIWAN_TWSE":           ("USDTWD", "FOREIGN_PER_USD"),
+    "SKOREA_KOSPI":          ("USDKRW", "FOREIGN_PER_USD"),
+    "NETHERLANDS_AEX":       ("EURUSD", "USD_PER_FOREIGN"),
+    "SPAIN_IBEX35":          ("EURUSD", "USD_PER_FOREIGN"),
+    "ITALY_FTSEMIB":         ("EURUSD", "USD_PER_FOREIGN"),
+    # No matching free bilateral pair -> USD return intentionally left blank:
+    # HONGKONG_HSI (HKD), CANADA_TSX (CAD), BRAZIL_BOVESPA (BRL),
+    # INDONESIA_JKSE (IDR), MEXICO_IPC (MXN), SINGAPORE_STI (SGD),
+    # SAUDI_TASI (SAR), SOUTHAFRICA_JSE (ZAR).
+}
+
+# ---------------------------------------------------------------------------
 # 3. COMMODITIES -- Yahoo Finance futures tickers.
 #    Lithium/Nickel don't have reliable free futures data -- proxied via ETFs.
 # ---------------------------------------------------------------------------

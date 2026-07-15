@@ -22,8 +22,8 @@ from config import (EQUITY_INDICES, CURRENCY_PAIRS, COMMODITIES, RISK_SENTIMENT,
                     BRICS_PLUS, INDIA_INDICES, PHASE_3_MODULES, PHASE_4_MODULES)
 from db import (read_prices, get_connection, init_schema, has_price_data,
                 get_secret)
-from transform.analytics import (period_returns, volatility, correlation_matrix,
-                                 drawdown)
+from transform.analytics import (period_returns, period_returns_usd, volatility,
+                                 correlation_matrix, drawdown)
 
 # --------------------------------------------------------------------------
 # Palette -- kept in one place so every chart/card stays on-theme.
@@ -250,7 +250,17 @@ def render_equities():
         area_chart(drawdown("equities", asset), f"{asset} drawdown", color=CORAL)
 
     with st.expander("Show detailed table"):
-        st.dataframe(style_table(returns), use_container_width=True)
+        # Interleave each window's local-currency return with its USD-adjusted
+        # counterpart so the two sit side by side. USD frame is reindexed onto
+        # the (possibly group-filtered) local frame; any index/window without a
+        # clean FX match stays NaN -> rendered as a dash only at display time.
+        usd = period_returns_usd("equities").reindex(index=returns.index,
+                                                     columns=returns.columns)
+        combined = pd.DataFrame(index=returns.index)
+        for w in returns.columns:
+            combined[w] = returns[w]
+            combined[f"{w} (USD)"] = usd[w]
+        st.dataframe(style_table(combined), use_container_width=True)
         st.markdown("**Correlation matrix (1Y daily returns)**")
         st.dataframe(style_table(correlation_matrix("equities")),
                      use_container_width=True)

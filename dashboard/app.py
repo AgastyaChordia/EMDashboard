@@ -171,6 +171,26 @@ def area_chart(series: pd.Series, title: str, color: str = VIOLET, unit="%"):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def price_chart(series: pd.Series, title: str, color: str = VIOLET):
+    """Price history as a line, on the same dark theme as area_chart (identical
+    plotly_dark template, transparent bg, margins, height, VIOLET accent). Uses
+    a plain line rather than a zero-baseline fill so price-level variation stays
+    legible. Shows a small clean note instead of a broken chart when empty."""
+    s = series.dropna()
+    if s.empty:
+        st.info("No price history for this index yet.")
+        return
+    fig = go.Figure(go.Scatter(
+        x=s.index, y=s.values, mode="lines",
+        line=dict(color=color, width=2),
+        hovertemplate="%{x|%Y-%m-%d}: %{y:,.2f}<extra></extra>"))
+    fig.update_layout(
+        template="plotly_dark", title=title, height=340,
+        margin=dict(l=10, r=10, t=48, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
 @st.cache_data(ttl=300)
 def latest_changes(module: str) -> pd.DataFrame:
     """Latest close + 1-day % change per asset in a module. Uses the last
@@ -190,6 +210,18 @@ def latest_changes(module: str) -> pd.DataFrame:
         prev = s.iloc[-2] if len(s) > 1 else last
         out[col] = {"price": last, "chg": (last / prev - 1) * 100}
     return pd.DataFrame(out).T
+
+
+@st.cache_data(ttl=300)
+def price_history(module: str, asset_id: str) -> pd.Series:
+    """Close-price history for one asset, straight from DuckDB via the existing
+    read path (no network). Indexed by date, ascending, NaNs dropped. Returns an
+    empty Series when the asset has no rows so callers can show a clean note."""
+    df = read_prices(asset_ids=[asset_id], module=module)
+    if df.empty:
+        return pd.Series(dtype=float)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date").set_index("date")["close"].dropna()
 
 
 def ticker_strip(asset_ids):
@@ -276,6 +308,16 @@ def render_equities():
         st.markdown("**Correlation matrix (1Y daily returns)**")
         st.dataframe(style_table(correlation_matrix("equities")),
                      use_container_width=True)
+
+    with st.expander("Historical price detail"):
+        # Per-row expanders aren't possible inside st.dataframe, so pick an
+        # index here and reveal its inline price history below. Options track
+        # the active group filter; key avoids colliding with the drawdown
+        # selectbox above.
+        hist_asset = st.selectbox("Index", list(returns.index),
+                                  key="equity_hist_select")
+        price_chart(price_history("equities", hist_asset),
+                    f"{hist_asset} — price history")
 
 
 def render_currencies():

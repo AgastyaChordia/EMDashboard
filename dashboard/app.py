@@ -91,12 +91,24 @@ def fmt(v, suffix="", pct=False, decimals=2):
 
 
 def style_table(df: pd.DataFrame):
-    """Format a *numeric* dataframe for display: show NaN as an en dash and
-    round floats, WITHOUT mutating the underlying data. Returns a pandas
+    """Format a *numeric* dataframe for display: show NaN/None as an en dash
+    and round floats, WITHOUT mutating the underlying data. Returns a pandas
     Styler so the columns stay numeric -- writing the '–' string into the
     data itself produced mixed str/float columns that pyarrow refused to
-    serialize (ArrowInvalid: "Could not convert '-' ...")."""
-    return df.style.format(na_rep=DASH, precision=2, thousands=",")
+    serialize (ArrowInvalid: "Could not convert '-' ...").
+
+    Uses an explicit per-cell formatter rather than only format(na_rep=...):
+    in this render path missing cells were leaking through as the literal
+    'None', so the callable maps every NaN/None to the en dash itself,
+    independent of how the renderer treats na_rep. Non-numeric cells (e.g. the
+    asset_id/date columns of other tables) pass through unchanged."""
+    def _fmt(v):
+        if pd.isna(v):
+            return DASH
+        if isinstance(v, (float, np.floating, int, np.integer)):
+            return f"{v:,.2f}"
+        return f"{v}"
+    return df.style.format(_fmt, na_rep=DASH)
 
 
 def kpi_row(items):

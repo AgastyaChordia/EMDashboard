@@ -12,12 +12,20 @@ import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
+import uuid
+from datetime import datetime
+
 import duckdb
 import pandas as pd
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data" / "market.duckdb"
 DB_PATH.parent.mkdir(exist_ok=True)
+
+# A 'running' fetch flag whose heartbeat is older than this is treated as a
+# crashed/interrupted run: the next caller may take it over (and resume it)
+# instead of being blocked forever.
+STALE_FETCH_SECONDS = 1800  # 30 min
 
 
 def get_secret(key: str, default=None):
@@ -108,6 +116,186 @@ def upsert_prices(df: pd.DataFrame):
         SELECT asset_id, module, date, open, high, low, close, volume FROM tmp_prices
     """)
     con.close()
+
+
+# --------------------------------------------------------------------------
+# Fetch coordination: a single-row lock + a per-ticker progress log. These let
+# the Streamlit UI run the (slow, rate-limit-prone) ingest safely on shared
+# cloud infra -- one fetch at a time, resumable after an interruption, and
+# never overlapping schema init. Kept separate from init_schema() so the flag
+# can be inspected before deciding whether to (re)init the heavy tables.
+# --------------------------------------------------------------------------
+def init_control_schema():
+    """Create the fetch-coordination tables and seed the singleton lock row.
+    Cheap and always safe to call; must run before any lock/progress helper."""
+    con = get_connection()
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS fetch_control (
+            id INTEGER PRIMARY KEY,     -- always 1 (singleton)
+            status VARCHAR,             -- 'idle' | 'running'
+            run_id VARCHAR,
+            started_at TIMESTAMP,
+            heartbeat TIMESTAMP
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS fetch_progress (
+            run_id VARCHAR,
+            asset_id VARCHAR,
+            module VARCHAR,
+            ticker VARCHAR,
+            status VARCHAR,             -- 'success' | 'failed'
+            reason VARCHAR,
+            updated_at TIMESTAMP,
+            PRIMARY KEY (run_id, asset_id)
+        )
+    """)
+    con.execute("""
+        INSERT INTO fetch_control (id, status)
+        SELECT 1, 'idle'
+        WHERE NOT EXISTS (SELECT 1 FROM fetch_control WHERE id = 1)
+    """)
+    con.close()
+
+
+def is_fetch_running(stale_after: int = STALE_FETCH_SECONDS) -> bool:
+    """True if a fetch holds the lock AND its heartbeat is still fresh. A stale
+    heartbeat (crashed run) reads as not-running so the UI can offer a restart."""
+    con = get_connection()
+    try:
+        row = con.execute(
+            "SELECT status, heartbeat FROM fetch_control WHERE id = 1").fetchone()
+    except Exception:
+        return False
+    finally:
+        con.close()
+    if not row or row[0] != "running":
+        return False
+    hb = row[1]
+    if hb is None:
+        return True
+    return (datetime.utcnow() - hb).total_seconds() < stale_after
+
+
+def try_begin_fetch(stale_after: int = STALE_FETCH_SECONDS):
+    """Atomically move the singleton lock idle->running. Returns
+    (acquired: bool, run_id: str|None, resumed: bool):
+
+    - lock idle            -> start a fresh run (new run_id, old progress
+                              cleared), acquired=True, resumed=False.
+    - running, heartbeat   -> another session owns it; acquired=False.
+      still fresh
+    - running, heartbeat   -> crashed run: take it over KEEPING its run_id so
+      stale                   its already-fetched tickers can be skipped,
+                              acquired=True, resumed=True.
+
+    The check-and-set runs in one transaction; if two callers race, DuckDB's
+    MVCC makes one commit conflict and we report it as not-acquired."""
+    con = get_connection()
+    now = datetime.utcnow()
+    try:
+        con.execute("BEGIN")
+        row = con.execute(
+            "SELECT status, run_id, heartbeat FROM fetch_control WHERE id = 1"
+        ).fetchone()
+        status = row[0] if row else "idle"
+        run_id = row[1] if row else None
+        hb = row[2] if row else None
+        if (status == "running" and hb is not None
+                and (now - hb).total_seconds() < stale_after):
+            con.execute("ROLLBACK")
+            return (False, None, False)
+        resumed = status == "running" and bool(run_id)
+        if not resumed:
+            run_id = uuid.uuid4().hex
+            # Fresh run: drop any progress rows from earlier runs so the
+            # "X of Y" counts and the skip set start clean.
+            con.execute("DELETE FROM fetch_progress WHERE run_id <> ?", [run_id])
+        con.execute(
+            "UPDATE fetch_control SET status='running', run_id=?, "
+            "started_at=?, heartbeat=? WHERE id = 1", [run_id, now, now])
+        con.execute("COMMIT")
+        return (True, run_id, resumed)
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        return (False, None, False)
+    finally:
+        con.close()
+
+
+def heartbeat_fetch(run_id: str):
+    """Refresh the lock's heartbeat so a long-but-healthy run isn't mistaken
+    for a crashed one. No-op if we no longer own the lock."""
+    con = get_connection()
+    try:
+        con.execute("UPDATE fetch_control SET heartbeat=? WHERE id=1 AND run_id=?",
+                    [datetime.utcnow(), run_id])
+    finally:
+        con.close()
+
+
+def end_fetch(run_id: str):
+    """Release the lock (back to idle) after a run completes. Only clears it if
+    we still own this run_id."""
+    con = get_connection()
+    try:
+        con.execute(
+            "UPDATE fetch_control SET status='idle', heartbeat=? "
+            "WHERE id=1 AND run_id=?", [datetime.utcnow(), run_id])
+    finally:
+        con.close()
+
+
+def succeeded_asset_ids(run_id: str) -> set:
+    """asset_ids already fetched successfully in this run -- the skip set that
+    makes a resumed fetch avoid re-doing completed work."""
+    con = get_connection()
+    try:
+        rows = con.execute(
+            "SELECT asset_id FROM fetch_progress "
+            "WHERE run_id=? AND status='success'", [run_id]).fetchall()
+        return {r[0] for r in rows}
+    finally:
+        con.close()
+
+
+def write_ticker_batch(price_df, run_id, asset_id, module, ticker,
+                       status, reason=None):
+    """Write one ticker's price rows AND its progress marker in a SINGLE
+    transaction, so a ticker is only ever recorded 'success' if its data
+    actually committed. That atomicity is what makes resume correct, and using
+    one short transaction per ticker keeps writes from overlapping schema init.
+    """
+    con = get_connection()
+    try:
+        con.execute("BEGIN")
+        if price_df is not None and not price_df.empty:
+            con.register("tmp_batch", price_df)
+            con.execute("""
+                INSERT OR REPLACE INTO prices
+                    (asset_id, module, date, open, high, low, close, volume)
+                SELECT asset_id, module, date, open, high, low, close, volume
+                FROM tmp_batch
+            """)
+            con.unregister("tmp_batch")
+        con.execute("""
+            INSERT OR REPLACE INTO fetch_progress
+                (run_id, asset_id, module, ticker, status, reason, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, [run_id, asset_id, module, ticker, status, reason,
+              datetime.utcnow()])
+        con.execute("COMMIT")
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        con.close()
 
 
 def upsert_macro(df: pd.DataFrame):

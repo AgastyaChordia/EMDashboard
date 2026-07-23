@@ -21,7 +21,9 @@ import streamlit as st
 from config import (EQUITY_INDICES, CURRENCY_PAIRS, COMMODITIES, RISK_SENTIMENT,
                     BRICS_PLUS, INDIA_INDICES, PHASE_3_MODULES, PHASE_4_MODULES)
 from db import (read_prices, get_connection, init_schema, has_price_data,
-                get_secret)
+                get_secret, init_control_schema, is_fetch_running,
+                try_begin_fetch, end_fetch, heartbeat_fetch,
+                succeeded_asset_ids)
 from transform.analytics import (period_returns, period_returns_usd, volatility,
                                  correlation_matrix, drawdown)
 
@@ -448,26 +450,91 @@ def render_roadmap():
 # file isn't in git, so the DB is empty. Let the user populate it in-app.
 # --------------------------------------------------------------------------
 def run_full_ingestion():
-    """Run the full pipeline in-app with a live progress indicator, then
-    clear cached reads and rerun so the fresh data shows immediately. Keys
-    come from get_secret() -> env var or st.secrets."""
+    """Run the full pipeline in-app with a live progress indicator, then clear
+    cached reads and rerun so the fresh data shows immediately. Keys come from
+    get_secret() -> env var or st.secrets.
+
+    Guarded by the DB-side fetch lock so two sessions can't fetch at once, and
+    resumable: an interrupted run leaves a stale lock that the next click takes
+    over, skipping the tickers that already succeeded."""
     # Imported lazily so a normal page load doesn't pay yfinance's import cost.
     from ingest import market_data, fixed_income, macro
-    with st.status("Fetching market data — this takes a couple of minutes…",
-                   expanded=True) as status:
-        st.write("① Equities, currencies, commodities, risk (Yahoo Finance)…")
-        market_data.run()
-        st.write("② Sovereign yields & credit spreads (FRED)…")
-        fixed_income.run()
-        st.write("③ Macro indicators (World Bank)…")
-        macro.run()
-        st.write("④ Generating AI weekly briefing…")
-        try:
-            from ai.commentary import generate_weekly_commentary
-            generate_weekly_commentary()
-        except Exception as e:
-            st.write(f"   AI briefing skipped: {e}")
-        status.update(label="Data ready ✓", state="complete")
+
+    acquired, run_id, resumed = try_begin_fetch()
+    if not acquired:
+        st.warning("A data fetch is already running in another session — "
+                   "please wait for it to finish.")
+        return
+
+    st.session_state["fetch_running"] = True
+    try:
+        total = market_data.total_ticker_count()
+        skip = succeeded_asset_ids(run_id) if resumed else set()
+        if resumed and skip:
+            st.info(f"Resuming an interrupted fetch — skipping "
+                    f"{len(skip)} of {total} tickers already fetched.")
+
+        with st.status("Fetching market data — this takes a couple of minutes…",
+                       expanded=True) as status:
+            st.write("① Equities, currencies, commodities, risk (Yahoo Finance)…")
+            bar = st.progress(0.0)
+            line = st.empty()
+
+            def on_progress(done, tot, asset_id, tstatus):
+                bar.progress(done / tot)
+                line.write(f"{done} of {tot} tickers — {asset_id} ({tstatus})")
+                if done % 5 == 0:            # keep the lock's heartbeat fresh
+                    heartbeat_fetch(run_id)
+
+            successes, failures = market_data.run_resumable(
+                run_id=run_id, skip=skip, on_progress=on_progress)
+
+            heartbeat_fetch(run_id)
+            st.write("② Sovereign yields & credit spreads (FRED)…")
+            try:
+                fixed_income.run()
+            except Exception as e:
+                st.write(f"   FRED step skipped: {e}")
+
+            heartbeat_fetch(run_id)
+            st.write("③ Macro indicators (World Bank)…")
+            try:
+                macro.run()
+            except Exception as e:
+                st.write(f"   Macro step skipped: {e}")
+
+            heartbeat_fetch(run_id)
+            st.write("④ Generating AI weekly briefing…")
+            try:
+                from ai.commentary import generate_weekly_commentary
+                generate_weekly_commentary()
+            except Exception as e:
+                st.write(f"   AI briefing skipped: {e}")
+
+            n_ok, n_fail = len(successes), len(failures)
+            done_label = f"{n_ok} of {total} tickers fetched"
+            if n_fail == 0:
+                status.update(label=f"Data ready ✓ — {done_label}",
+                              state="complete")
+            else:
+                status.update(
+                    label=f"Finished — {done_label}, {n_fail} failed",
+                    state="error" if n_ok == 0 else "complete")
+
+        # Summary rendered outside the status box so it stays visible after.
+        st.success(f"Fetched {len(successes)} of {total} Yahoo Finance tickers.")
+        if failures:
+            st.warning(f"{len(failures)} ticker(s) failed:")
+            st.dataframe(
+                pd.DataFrame(failures, columns=["asset_id", "ticker", "reason"]),
+                use_container_width=True)
+    finally:
+        # Always release the lock on a clean finish. A hard interruption
+        # (container restart) skips this, leaving a stale lock the next run
+        # resumes from.
+        end_fetch(run_id)
+        st.session_state["fetch_running"] = False
+
     # DuckDB now holds the data (persists across reruns/opens on the same
     # container). Clear the @st.cache_data read caches so charts pick it up;
     # we only ever refetch from the network when a button is clicked again.
@@ -488,8 +555,12 @@ def render_first_run():
             "Streamlit Cloud → Settings → Secrets. FRED powers the yields tab "
             "and ANTHROPIC the AI briefing; equities/FX/commodities/macro will "
             "still load without them.")
-    if st.button("⬇  Fetch market data now", type="primary"):
+    busy = is_fetch_running()
+    if st.button("⬇  Fetch market data now", type="primary", disabled=busy):
         run_full_ingestion()
+    if busy:
+        st.caption("⏳ A fetch is currently running — button disabled until it "
+                   "finishes.")
 
 
 # --------------------------------------------------------------------------
@@ -506,8 +577,14 @@ SECTIONS = {
     "\U0001F5FA️  Roadmap":    render_roadmap,
 }
 
-# Make sure the tables exist before any read -- on a fresh deploy they won't.
-init_schema()
+# Control tables are tiny and needed to read the fetch flag -- always ensure
+# they exist. The heavy price/macro/commentary schema init, however, must not
+# run while a fetch is writing, so skip it when a fetch is in progress (a
+# running fetch guarantees those tables already exist).
+init_control_schema()
+fetch_busy = is_fetch_running()
+if not fetch_busy:
+    init_schema()
 data_ready = has_price_data()
 
 with st.sidebar:
@@ -516,10 +593,13 @@ with st.sidebar:
     choice = st.radio("Navigate", list(SECTIONS.keys()), label_visibility="collapsed")
     st.divider()
     st.caption("Data: Yahoo Finance · FRED · World Bank")
+    if fetch_busy:
+        st.caption("⏳ A data fetch is currently running…")
     if data_ready:
         # Persistent refetch control -- data is otherwise cached (the DuckDB
-        # file), so the network is only hit when this is clicked.
-        if st.button("↻  Refresh data"):
+        # file), so the network is only hit when this is clicked. Disabled
+        # while a fetch runs so a second one can't be kicked off.
+        if st.button("↻  Refresh data", disabled=fetch_busy):
             run_full_ingestion()
 
 st.title("Global & emerging markets")

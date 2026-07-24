@@ -10,16 +10,25 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import pandas as pd
 import numpy as np
+from dateutil.relativedelta import relativedelta
 
 from db import read_prices
 from config import INDEX_FX_MAP
 
+# Each window is a *calendar* period, matching the convention Google/Yahoo
+# Finance use: the anchor is (latest data date - this period), not a fixed
+# count of trading rows. relativedelta does true calendar arithmetic (e.g.
+# subtracting 1 month from Mar 31 lands on Feb 28/29), unlike a day-count
+# approximation. See _anchor_dates for how a weekend/holiday anchor is rolled
+# backward to the most recent trading day.
 RETURN_WINDOWS = {
-    "1M": 21, "3M": 63, "6M": 126, "1Y": 252,
-    "3Y": 756, "5Y": 1260, "10Y": 2520,
-    # ingest/market_data.py now pulls period="max", so these long windows have
-    # the history they need. Any asset whose series is shorter than a given
-    # window simply comes back blank for that column (shown as "-" in the UI).
+    "1M": relativedelta(months=1),
+    "3M": relativedelta(months=3),
+    "6M": relativedelta(months=6),
+    "1Y": relativedelta(years=1),
+    "3Y": relativedelta(years=3),
+    "5Y": relativedelta(years=5),
+    "10Y": relativedelta(years=10),
 }
 
 
@@ -31,17 +40,47 @@ def _pivot_close(module: str) -> pd.DataFrame:
     return df.pivot(index="date", columns="asset_id", values="close").sort_index()
 
 
+def _anchor_dates(s: pd.Series, offset: relativedelta):
+    """Calendar-anchored (end_date, start_date) for one asset's close series,
+    or (None, None) if history doesn't reach the window.
+
+    - end_date   = the asset's own latest available data date.
+    - start_date = the most recent trading day at or before
+      (end_date - offset). If the anchor lands on a weekend/holiday/gap we roll
+      *backward* only (never forward -- forward would shorten the window).
+    - If no data exists at or before the anchor, returns (None, None) so the
+      caller yields NaN rather than falling back to the earliest row.
+    """
+    s = s.dropna()
+    if s.empty:
+        return None, None
+    end_date = s.index[-1]
+    anchor = end_date - offset
+    prior = s.loc[:anchor]          # inclusive of anchor; backward fill only
+    if prior.empty:
+        return None, None
+    return end_date, prior.index[-1]
+
+
 def period_returns(module: str) -> pd.DataFrame:
-    """% return over each window in RETURN_WINDOWS, for every asset in the module."""
+    """% return over each calendar window in RETURN_WINDOWS, per asset.
+
+    Anchoring is per-asset and calendar-based (see _anchor_dates): the endpoint
+    is each asset's latest close, the start is the most recent trading day at or
+    before end-minus-window. Assets without enough history for a window get NaN
+    for that column."""
     px = _pivot_close(module)
     if px.empty:
         return pd.DataFrame()
     out = {}
-    latest = px.iloc[-1]
-    for label, days in RETURN_WINDOWS.items():
-        if len(px) > days:
-            past = px.iloc[-days - 1]
-            out[label] = (latest / past - 1) * 100
+    for label, offset in RETURN_WINDOWS.items():
+        col = {}
+        for asset_id in px.columns:
+            s = px[asset_id]
+            end_d, start_d = _anchor_dates(s, offset)
+            col[asset_id] = (np.nan if end_d is None
+                             else (s.loc[end_d] / s.loc[start_d] - 1) * 100)
+        out[label] = pd.Series(col)
     return pd.DataFrame(out)
 
 
@@ -81,7 +120,12 @@ def period_returns_usd(module: str = "equities") -> pd.DataFrame:
 
     where fx_return already carries the correct sign per INDEX_FX_MAP. Indices
     without a clean FX match (or with missing FX for the window) come back NaN.
-    Values are in percent, matching period_returns()."""
+    Values are in percent, matching period_returns().
+
+    Crucially, the FX leg is evaluated on the *same* (end_date, start_date)
+    anchors as the local return for that asset+window -- the factor series is
+    aligned to the equity calendar, then indexed by those exact dates -- so the
+    USD numbers can't drift from the local ones."""
     px = _pivot_close(module)
     if px.empty:
         return pd.DataFrame()
@@ -89,14 +133,22 @@ def period_returns_usd(module: str = "equities") -> pd.DataFrame:
     if factor.empty:
         return pd.DataFrame()
     out = {}
-    for label, days in RETURN_WINDOWS.items():
-        if len(px) <= days:
-            continue
-        local = px.iloc[-1] / px.iloc[-days - 1] - 1
-        fx_ret = factor.iloc[-1] / factor.iloc[-days - 1] - 1
-        # Series align on asset_id; indices absent from `factor` -> NaN, which
-        # propagates so their USD cell stays blank rather than mirroring local.
-        out[label] = ((1 + local) * (1 + fx_ret) - 1) * 100
+    for label, offset in RETURN_WINDOWS.items():
+        col = {}
+        for asset_id in px.columns:
+            if asset_id not in factor.columns:
+                col[asset_id] = np.nan          # no FX mapping -> blank
+                continue
+            s = px[asset_id]
+            end_d, start_d = _anchor_dates(s, offset)
+            if end_d is None:
+                col[asset_id] = np.nan          # not enough history -> blank
+                continue
+            local = s.loc[end_d] / s.loc[start_d] - 1
+            f = factor[asset_id]
+            fx_ret = f.loc[end_d] / f.loc[start_d] - 1   # same anchor dates
+            col[asset_id] = ((1 + local) * (1 + fx_ret) - 1) * 100
+        out[label] = pd.Series(col)
     return pd.DataFrame(out)
 
 

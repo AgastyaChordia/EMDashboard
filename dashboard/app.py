@@ -19,11 +19,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import (EQUITY_INDICES, CURRENCY_PAIRS, COMMODITIES, RISK_SENTIMENT,
-                    BRICS_PLUS, INDIA_INDICES, PHASE_3_MODULES, PHASE_4_MODULES)
+                    BRICS_PLUS, INDIA_INDICES, PHASE_3_MODULES, PHASE_4_MODULES,
+                    VALUATION_TICKERS, VALUATION_METRICS, VALUATION_LABELS)
 from db import (read_prices, get_connection, init_schema, has_price_data,
                 get_secret, init_control_schema, is_fetch_running,
                 try_begin_fetch, end_fetch, heartbeat_fetch,
-                succeeded_asset_ids)
+                succeeded_asset_ids, read_valuations)
 from transform.analytics import (period_returns, period_returns_usd, volatility,
                                  correlation_matrix, drawdown)
 
@@ -193,6 +194,35 @@ def price_chart(series: pd.Series, title: str, color: str = VIOLET):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def valuation_history_chart(df: pd.DataFrame, title: str):
+    """Trailing PE / Forward PE / CAPE as three lines over time, on the same
+    dark theme as the other charts (plotly_dark, transparent bg, same margins).
+    Metrics with no data for this index are simply not plotted -- never zeroed."""
+    colors = {"pe-trailing": VIOLET, "pe-forward": TEAL, "cape": CORAL}
+    fig = go.Figure()
+    plotted = 0
+    for metric in VALUATION_METRICS:
+        s = (df[df["metric"] == metric].sort_values("date")
+             .set_index("date")["value"].dropna())
+        if s.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=s.index, y=s.values, mode="lines+markers",
+            name=VALUATION_LABELS[metric],
+            line=dict(color=colors[metric], width=2),
+            hovertemplate="%{x|%Y-%m-%d}: %{y:,.2f}"))
+        plotted += 1
+    if plotted == 0:
+        st.info("No valuation history for this index yet.")
+        return
+    fig.update_layout(
+        template="plotly_dark", title=title, height=340,
+        margin=dict(l=10, r=10, t=48, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 @st.cache_data(ttl=300)
 def latest_changes(module: str) -> pd.DataFrame:
     """Latest close + 1-day % change per asset in a module. Uses the last
@@ -323,6 +353,47 @@ def render_equities():
 
     st.caption("Source: Yahoo Finance · USD returns converted using FX rates "
                "from the same source")
+
+
+def render_valuations():
+    st.subheader("Valuations")
+    vals = read_valuations()
+    if vals.empty:
+        st.info("No data yet -- run `python ingest/valuations.py` first.")
+        return
+    vals["date"] = pd.to_datetime(vals["date"])
+
+    # Latest observation per (asset_id, metric), widened to one row per index.
+    latest = (vals.sort_values("date")
+              .groupby(["asset_id", "metric"]).tail(1)
+              .pivot(index="asset_id", columns="metric", values="value"))
+
+    # Follow the config mapping's order, keeping only indices that actually
+    # have data. Anything unmapped never appears -- no proxying.
+    order = [a for a in VALUATION_TICKERS.values() if a in latest.index]
+    if not order:
+        st.info("No valuation data for the mapped indices yet.")
+        return
+    latest = latest.reindex(order)
+
+    tbl = pd.DataFrame(index=latest.index)
+    for metric in VALUATION_METRICS:
+        tbl[VALUATION_LABELS[metric]] = (latest[metric]
+                                         if metric in latest.columns else np.nan)
+    # Implied EPS growth = trailing/forward - 1. Stays NaN whenever either leg
+    # is missing (e.g. N225 has no forward PE) -- deliberately not zero-filled.
+    tbl["Implied EPS growth"] = (tbl["Trailing PE"] / tbl["Forward PE"] - 1) * 100
+    tbl.index.name = "Index"
+    st.dataframe(style_table(tbl), use_container_width=True)
+
+    with st.expander("Valuation history"):
+        asset = st.selectbox("Index", order, key="valuation_hist_select")
+        valuation_history_chart(vals[vals["asset_id"] == asset],
+                                f"{asset} — valuation history")
+
+    st.caption("Source: Siblis Research · PE data as of latest available "
+               "month-end · USA and CAN are broad large-cap indices, not "
+               "exactly S&P 500 / TSX")
 
 
 def render_currencies():
@@ -581,6 +652,7 @@ def render_first_run():
 # --------------------------------------------------------------------------
 SECTIONS = {
     "\U0001F4C8  Equities":        render_equities,
+    "\U0001F4D0  Valuations":      render_valuations,
     "\U0001F4B1  Currencies":      render_currencies,
     "\U0001F6E2️  Commodities": render_commodities,
     "\U0001F3E6  Fixed income":    render_fixed_income,

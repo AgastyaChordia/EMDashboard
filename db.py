@@ -101,6 +101,20 @@ def init_schema():
             PRIMARY KEY (report_date, module)
         )
     """)
+    # Valuation multiples get their own table rather than riding in `prices`:
+    # prices is keyed (asset_id, date), which can't hold three metrics for the
+    # same index on the same date. Same shape as macro_indicators.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS valuations (
+            asset_id VARCHAR,
+            metric VARCHAR,       -- pe-trailing | pe-forward | cape
+            date DATE,
+            value DOUBLE,
+            source VARCHAR,
+            fetched_at TIMESTAMP DEFAULT current_timestamp,
+            PRIMARY KEY (asset_id, metric, date)
+        )
+    """)
     con.close()
 
 
@@ -310,6 +324,39 @@ def upsert_macro(df: pd.DataFrame):
         SELECT country, indicator, date, value, source FROM tmp_macro
     """)
     con.close()
+
+
+def upsert_valuations(df: pd.DataFrame):
+    """df must have columns: asset_id, metric, date, value, source"""
+    if df.empty:
+        return
+    con = get_connection()
+    con.register("tmp_val", df)
+    con.execute("""
+        INSERT OR REPLACE INTO valuations (asset_id, metric, date, value, source)
+        SELECT asset_id, metric, date, value, source FROM tmp_val
+    """)
+    con.close()
+
+
+def read_valuations(asset_ids=None, metrics=None) -> pd.DataFrame:
+    con = get_connection()
+    query = "SELECT * FROM valuations WHERE 1=1"
+    params = []
+    if asset_ids:
+        query += " AND asset_id IN (" + ",".join(["?"] * len(asset_ids)) + ")"
+        params += list(asset_ids)
+    if metrics:
+        query += " AND metric IN (" + ",".join(["?"] * len(metrics)) + ")"
+        params += list(metrics)
+    try:
+        df = con.execute(query, params).df()
+    except Exception:
+        # Table not created yet (pre-existing DB that hasn't been re-inited).
+        df = pd.DataFrame()
+    finally:
+        con.close()
+    return df
 
 
 def save_commentary(report_date, module, body):

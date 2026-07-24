@@ -18,6 +18,8 @@ def main():
          "ingest.fixed_income", "run"),
         ("Macro indicators (World Bank)",
          "ingest.macro", "run"),
+        ("Index valuations (Siblis Research)",
+         "ingest.valuations", "run"),
     ]
 
     for label, module_name, func_name in steps:

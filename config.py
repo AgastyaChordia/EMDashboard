@@ -131,6 +131,45 @@ INDEX_FX_MAP = {
 }
 
 # ---------------------------------------------------------------------------
+# 2c. VALUATIONS -- Siblis Research free data API (no key needed).
+#     Endpoint: {SIBLIS_API_BASE}/{ticker}/{metric}
+#     Maps the Siblis index ticker -> our asset_id. Only these twelve indices
+#     have free valuation coverage; any index missing from this map simply
+#     doesn't appear in the valuation table (never proxied or fabricated).
+#
+#     Note: Siblis "USA" and "CAN" are broad large-cap aggregates, NOT exactly
+#     the S&P 500 / TSX Composite -- surfaced as a caption in the UI.
+# ---------------------------------------------------------------------------
+SIBLIS_API_BASE = "https://siblisresearch.supabase.co/functions/v1/free-data-api/v1"
+
+VALUATION_TICKERS = {
+    "NIFTY": "INDIA_NIFTY50",
+    "DAX":   "GERMANY_DAX",
+    "CAC":   "FRANCE_CAC40",
+    "UKX":   "UK_FTSE100",
+    "N225":  "JAPAN_NIKKEI",
+    "KOSPI": "SKOREA_KOSPI",
+    "HSI":   "HONGKONG_HSI",
+    "IBOV":  "BRAZIL_BOVESPA",
+    "SSE":   "CHINA_SSE",
+    "NDX":   "US_NASDAQ",
+    "USA":   "US_SP500",
+    "CAN":   "CANADA_TSX",
+}
+
+# Only these three metrics work on the free tier. 'pe', 'eps', 'pb' and
+# 'dividend-yield' either 400 or return null values -- deliberately not
+# requested rather than fetched-and-discarded.
+VALUATION_METRICS = ["pe-trailing", "pe-forward", "cape"]
+
+# Display labels for the valuation table / history chart.
+VALUATION_LABELS = {
+    "pe-trailing": "Trailing PE",
+    "pe-forward":  "Forward PE",
+    "cape":        "CAPE",
+}
+
+# ---------------------------------------------------------------------------
 # 3. COMMODITIES -- Yahoo Finance futures tickers.
 #    Lithium/Nickel don't have reliable free futures data -- proxied via ETFs.
 # ---------------------------------------------------------------------------
